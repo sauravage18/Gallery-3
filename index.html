@@ -3,19 +3,10 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Gallery 3 (IndexedDB + AES-GCM)</title>
+  <title>Encrypted Offline Image & GIF Gallery (IndexedDB + AES-GCM) — Folders</title>
   <link rel="icon" href="data:," />
   <style>
-    /* (styles unchanged from your original, slightly trimmed) */
-    :root {
-    --bg: #cbc514;
-    --panel: #1c1f3a;
-    --soft: #2a2f4f;
-    --accent: #f5f5ff;
-    --accent-2: #6a5acd;
-    --text: #f5f5ff;
-    --muted: #a5a5c3;
-}
+    :root{--bg:#0f1226;--panel:#161a36;--soft:#222651;--accent:#7c8cff;--accent-2:#50e3c2;--text:#eaf0ff;--muted:#9aa4d7}
     *{box-sizing:border-box} html,body{height:100%} body{margin:0;background:linear-gradient(180deg,var(--bg),#0b0e1e 60%);color:var(--text);font:14px/1.4 system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
     header{position:sticky;top:0;z-index:5;background:rgba(15,18,38,.8);backdrop-filter:blur(8px);border-bottom:1px solid #1f2350}
     .wrap{max-width:1100px;margin:0 auto;padding:16px} h1{margin:0;font-size:20px;letter-spacing:.3px}
@@ -44,12 +35,20 @@
     .modal-body{padding:12px} .modal-body img{max-width:90vw;max-height:70vh;display:block}
     .close-x{background:transparent;border:0;color:var(--muted);font-size:22px;cursor:pointer}
     .hidden{display:none}
+
+    /* folders UI */
+    .folders-row{display:flex;gap:8px;align-items:center;margin-top:12px}
+    .folder-pill{padding:8px 12px;border-radius:999px;border:1px solid #22265a;background:linear-gradient(180deg,#151834,#0e1130);cursor:pointer}
+    .folder-pill.active{outline:2px solid rgba(124,140,255,.18)}
+    .folder-controls{display:flex;gap:8px;align-items:center;margin-left:auto}
+    .small-input{padding:8px 10px;border-radius:10px;border:1px solid #2b2f66;background:transparent;color:var(--text)}
+    .move-select{padding:8px;border-radius:10px;border:1px solid #2b2f66;background:linear-gradient(180deg,#151a44,#0f1330);color:var(--text)}
   </style>
 </head>
 <body>
   <header>
     <div class="wrap">
-      <h1>Gallery 3 <span style="color:var(--accent)">— stored encrypted in your browser</span></h1>
+      <h1>Encrypted Offline Image & GIF Gallery <span style="color:var(--accent)">— stored encrypted in your browser</span></h1>
       <div class="toolbar">
         <label class="file-label" title="Choose images">
           <input id="fileInput" type="file" accept="image/*" multiple />
@@ -59,23 +58,39 @@
           <input id="importInput" type="file" accept="application/json" />
           📥 Import (.json)
         </label>
+
         <button id="exportSel" disabled>💾 Export Selected</button>
         <button id="exportAll" disabled>💾 Export All</button>
         <button id="selectAll" disabled>☑️ Select All</button>
         <button id="clearSel" disabled>🗑️ Delete Selected</button>
         <button id="clearAll" disabled>🧹 Clear All</button>
+
         <div class="stats" id="stats">0 items · 0 MB used</div>
       </div>
+
+      <!-- folders row -->
+      <div class="folders-row" id="foldersRow">
+        <!-- generated folder pills will appear here -->
+        <div style="display:flex;gap:8px;align-items:center">
+          <input id="newFolderName" class="small-input" placeholder="New folder name" />
+          <button id="createFolder">📁 Create Folder</button>
+        </div>
+        <div class="folder-controls">
+          <select id="moveToSelect" class="move-select"><option value="">Move selected to...</option></select>
+          <button id="renameFolderBtn" disabled>✏️ Rename</button>
+          <button id="deleteFolderBtn" disabled>🗑️ Delete Folder</button>
+        </div>
+      </div>
+
     </div>
   </header>
 
   <main>
-    <div id="dropzone" class="dropzone">Drag & drop images/GIFs here, or use the Upload button above.</div>
+    <div id="dropzone" class="dropzone">Drag & drop images/GIFs here, or use the Upload button above. Drop directly onto a folder pill to add there.</div>
     <div id="gallery" class="grid" aria-live="polite"></div>
     <div id="emptyState" class="empty hidden">No images yet. Upload or drop some to get started ✨</div>
   </main>
 
-  
   <dialog id="viewer">
     <div class="modal-head">
       <div id="viewerName">Preview</div>
@@ -86,7 +101,7 @@
 
   <script>
   // ------------------ Config / DB names ---------------------
-  const DB_NAME = 'offline-image-gallery-v3-encrypted';
+  const DB_NAME = 'offline-image-gallery-v1-encrypted';
   const STORE = 'images';
   const META = 'meta';
   const DB_VERSION = 1;
@@ -94,6 +109,7 @@
   // ------------------ Crypto settings -----------------------
   const PBKDF2_ITERATIONS = 200000;
   const SALT_KEY = 'salt'; // stored in meta store
+  const FOLDERS_KEY = 'folders';
   const ENC_ALGO = { name: 'AES-GCM', length: 256 };
   let cryptoKey = null;
   let salt = null;
@@ -153,19 +169,8 @@
   const uid = () => crypto.randomUUID ? crypto.randomUUID() : (Date.now()+Math.random()).toString(36);
   async function blobToArrayBuffer(blob){ return await blob.arrayBuffer(); }
   function arrayBufferToBlob(ab, type){ return new Blob([ab], { type: type || 'application/octet-stream' }); }
-  function u8aToBase64(u8a){
-    // for exporting encrypted payload if needed
-    let binary = '';
-    const len = u8a.byteLength;
-    for(let i=0;i<len;i++) binary += String.fromCharCode(u8a[i]);
-    return btoa(binary);
-  }
-  function base64ToU8a(b64){
-    const bin = atob(b64);
-    const u8 = new Uint8Array(bin.length);
-    for(let i=0;i<bin.length;i++) u8[i] = bin.charCodeAt(i);
-    return u8;
-  }
+  function u8aToBase64(u8a){ let binary = ''; const len = u8a.byteLength; for(let i=0;i<len;i++) binary += String.fromCharCode(u8a[i]); return btoa(binary); }
+  function base64ToU8a(b64){ const bin = atob(b64); const u8 = new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) u8[i] = bin.charCodeAt(i); return u8; }
 
   // ------------------ Crypto core ---------------------------
   async function deriveKeyFromPassword(password, saltBytes){
@@ -182,7 +187,6 @@
   }
 
   async function ensureSaltAndKey(password){
-    // get salt from meta or create new
     const metaSalt = await metaGet(SALT_KEY);
     if(metaSalt){
       salt = Uint8Array.from(metaSalt);
@@ -197,13 +201,13 @@
   async function encryptArrayBuffer(ab){
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const cipher = await crypto.subtle.encrypt({ name:'AES-GCM', iv }, cryptoKey, ab);
-    return { iv: Array.from(iv), cipher: cipher }; // cipher is ArrayBuffer
+    return { iv: Array.from(iv), cipher: cipher };
   }
 
   async function decryptToArrayBuffer(ivArr, cipherAB){
     const iv = new Uint8Array(ivArr);
     const plain = await crypto.subtle.decrypt({ name:'AES-GCM', iv }, cryptoKey, cipherAB);
-    return plain; // ArrayBuffer
+    return plain;
   }
 
   // ------------------ DOM elements & state -------------------
@@ -222,7 +226,75 @@
   const viewerImg = $('#viewerImg');
   const viewerName = $('#viewerName');
 
+  const newFolderNameInput = $('#newFolderName');
+  const createFolderBtn = $('#createFolder');
+  const foldersRow = $('#foldersRow');
+  const moveToSelect = $('#moveToSelect');
+  const renameFolderBtn = $('#renameFolderBtn');
+  const deleteFolderBtn = $('#deleteFolderBtn');
+
   let selections = new Set();
+  let folders = []; // { id, name }
+  let currentFolderId = null; // null = All items
+
+  // ------------------ Folders persistence -------------------
+  async function loadFolders(){
+    const f = await metaGet(FOLDERS_KEY) || [];
+    folders = f;
+    renderFolderPills();
+    rebuildMoveSelect();
+  }
+  async function saveFolders(){ await metaPut(FOLDERS_KEY, folders); renderFolderPills(); rebuildMoveSelect(); }
+  function createFolder(name){ const id = uid(); folders.push({ id, name }); saveFolders(); return id; }
+  function renameFolder(id, name){ const idx = folders.findIndex(f=>f.id===id); if(idx>=0){ folders[idx].name = name; saveFolders(); }}
+  function deleteFolder(id){ // move images in folder to null (Unsorted) then remove folder
+    return new Promise(async (res,rej)=>{
+      try{
+        const all = await getAllRecords();
+        for(const it of all){ if(it.folderId === id){ it.folderId = null; await putImageRecord(it); }}
+        folders = folders.filter(f=>f.id!==id);
+        await saveFolders();
+        res();
+      }catch(e){ rej(e); }
+    });
+  }
+
+  function renderFolderPills(){
+    // rebuild visible pills (we keep the create inputs in DOM so only update pills area)
+    // We'll place pills before the create controls, so find existing pills and remove them
+    // Simple: clear all non-controls in foldersRow then add pills at left
+    const pills = Array.from(foldersRow.querySelectorAll('.folder-pill')); pills.forEach(p=>p.remove());
+    // Add special pills: All, Unsorted
+    const allPill = document.createElement('div'); allPill.className = 'folder-pill'+(currentFolderId===null?' active':''); allPill.textContent = 'All Items'; allPill.onclick = ()=>{ currentFolderId = null; refresh(); renderFolderPills(); };
+    foldersRow.insertBefore(allPill, foldersRow.firstChild);
+    const unsortedPill = document.createElement('div'); unsortedPill.className = 'folder-pill'+(currentFolderId==='__unsorted__'?' active':''); unsortedPill.textContent = 'Unsorted'; unsortedPill.onclick = ()=>{ currentFolderId = '__unsorted__'; refresh(); renderFolderPills(); };
+    foldersRow.insertBefore(unsortedPill, foldersRow.firstChild.nextSibling);
+
+    // user folders
+    for(const f of folders){
+      const el = document.createElement('div');
+      el.className = 'folder-pill'+(currentFolderId===f.id?' active':'');
+      el.textContent = f.name;
+      el.title = `Folder: ${f.name}`;
+      el.onclick = ()=>{ currentFolderId = f.id; refresh(); renderFolderPills(); };
+      // support dropping files directly onto pill
+      el.addEventListener('dragover', e=>{ e.preventDefault(); el.style.opacity = '0.8'; });
+      el.addEventListener('dragleave', ()=>{ el.style.opacity = ''; });
+      el.addEventListener('drop', async e=>{ e.preventDefault(); el.style.opacity = ''; if(e.dataTransfer.files?.length){ await ingestFiles(e.dataTransfer.files, f.id); }});
+      foldersRow.insertBefore(el, foldersRow.children[2] || null);
+    }
+
+    // update rename/delete button enabled state based on currentFolderId
+    const isUserFolder = folders.some(ff=>ff.id===currentFolderId);
+    renameFolderBtn.disabled = !isUserFolder;
+    deleteFolderBtn.disabled = !isUserFolder;
+  }
+
+  function rebuildMoveSelect(){
+    moveToSelect.innerHTML = '<option value="">Move selected to...</option>';
+    moveToSelect.appendChild(new Option('Unsorted','__unsorted__'));
+    for(const f of folders){ moveToSelect.appendChild(new Option(f.name, f.id)); }
+  }
 
   // ------------------ Rendering / Refresh --------------------
   async function refresh(){
@@ -237,18 +309,21 @@
     selectAllBtn.disabled = items.length === 0;
     emptyState.classList.toggle('hidden', items.length !== 0);
 
-    // latest first
-    items.sort((a,b)=> (b.addedAt||0) - (a.addedAt||0));
+    // filter by currentFolderId
+    let filtered = items.slice();
+    if(currentFolderId === '__unsorted__') filtered = filtered.filter(it=>!it.folderId);
+    else if(currentFolderId) filtered = filtered.filter(it=> it.folderId === currentFolderId);
 
-    for(const it of items){
-      // decrypt per item
+    // latest first
+    filtered.sort((a,b)=> (b.addedAt||0) - (a.addedAt||0));
+
+    for(const it of filtered){
       let blob;
       try{
         const plainAB = await decryptToArrayBuffer(it.iv, it.cipher);
         blob = arrayBufferToBlob(plainAB, it.type || 'image/*');
       }catch(err){
         console.error('Decryption failed for', it.id, err);
-        // show placeholder broken item
         const cardErr = document.createElement('div');
         cardErr.className = 'card';
         cardErr.innerHTML = `<div style="padding:14px;color:var(--muted)">Unable to decrypt "${it.name}" — maybe wrong password.</div>`;
@@ -259,11 +334,15 @@
       const url = URL.createObjectURL(blob);
       const card = document.createElement('div');
       card.className = 'card';
+      const folderLabel = it.folderId ? (folders.find(f=>f.id===it.folderId)?.name || 'Folder') : '';
       card.innerHTML = `
         <div class="select"><input type="checkbox" aria-label="Select ${it.name}" ${selections.has(it.id)?'checked':''}></div>
         <img class="thumb" src="${url}" alt="${it.name}">
         <div class="meta">
-          <div class="name" title="${it.name}">${it.name}</div>
+          <div style="display:flex;gap:8px;align-items:center;min-width:0">
+            <div class="name" title="${it.name}">${it.name}</div>
+            ${folderLabel?`<div class="badge" title="Folder">${folderLabel}</div>`:''}
+          </div>
           <div class="badge">${(it.type||'image').split('/').pop().toUpperCase()}</div>
         </div>
         <div class="actions">
@@ -273,32 +352,18 @@
         </div>
       `;
 
-      // Checkbox
       const cb = card.querySelector('input[type=checkbox]');
       cb.addEventListener('change', () => {
         if(cb.checked) selections.add(it.id); else selections.delete(it.id);
         updateSelectionButtons();
       });
 
-      // View
-      card.querySelector('[data-act=view]').addEventListener('click',()=>{
-        viewerImg.src = url; viewerName.textContent = it.name; viewer.showModal();
-      });
+      card.querySelector('[data-act=view]').addEventListener('click',()=>{ viewerImg.src = url; viewerName.textContent = it.name; viewer.showModal(); });
 
-      // Delete
-      card.querySelector('[data-act=del]').addEventListener('click', async ()=>{
-        if(confirm(`Delete \"${it.name}\"?`)){
-          await deleteImageRecord(it.id); selections.delete(it.id); refresh();
-        }
-      });
+      card.querySelector('[data-act=del]').addEventListener('click', async ()=>{ if(confirm(`Delete \"${it.name}\"?`)){ await deleteImageRecord(it.id); selections.delete(it.id); refresh(); } });
 
-      // Download (single) — create link to decrypted blob
-      card.querySelector('[data-act=dl]').addEventListener('click',()=>{
-        const a = document.createElement('a');
-        a.href = url; a.download = it.name || 'image'; a.click();
-      });
+      card.querySelector('[data-act=dl]').addEventListener('click',()=>{ const a = document.createElement('a'); a.href = url; a.download = it.name || 'image'; a.click(); });
 
-      // Click thumb to toggle selection
       card.querySelector('.thumb').addEventListener('click',()=>{ cb.checked=!cb.checked; cb.dispatchEvent(new Event('change')); });
 
       gallery.appendChild(card);
@@ -321,14 +386,14 @@
         const plainAB = await decryptToArrayBuffer(r.iv, r.cipher);
         const blob = arrayBufferToBlob(plainAB, r.type);
         const dataURL = await blobToDataURL(blob);
-        images.push({ id: r.id, name: r.name, type: r.type, size: r.size, lastModified: r.lastModified, addedAt: r.addedAt, dataURL });
+        images.push({ id: r.id, name: r.name, type: r.type, size: r.size, lastModified: r.lastModified, addedAt: r.addedAt, folderId: r.folderId||null, dataURL });
       }catch(err){
         console.error('Failed decrypt for export', r.id, err);
         alert('Failed to decrypt one or more items for export. Export aborted.');
         return;
       }
     }
-    const payload = { version:1, exportedAt:new Date().toISOString(), images };
+    const payload = { version:1, exportedAt:new Date().toISOString(), folders, images };
     const blob = new Blob([JSON.stringify(payload)], {type:'application/json'});
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -341,12 +406,20 @@
       const text = await file.text();
       const payload = JSON.parse(text);
       if(!payload || !Array.isArray(payload.images)) throw new Error('Invalid file');
+
+      // import folders first (preserve/create and map old folder ids to new ones)
+      const oldToNew = {};
+      if(Array.isArray(payload.folders)){
+        for(const f of payload.folders){ const newid = createFolder(f.name||'Imported'); oldToNew[f.id] = newid; }
+      }
+
       for(const img of payload.images){
         // convert dataURL to blob
         const blob = await (await fetch(img.dataURL)).blob();
         const ab = await blobToArrayBuffer(blob);
         const enc = await encryptArrayBuffer(ab);
-        const rec = { id: uid(), name: img.name||'imported-image', type: blob.type||img.type||'image/*', size: blob.size||img.size, lastModified: img.lastModified||Date.now(), addedAt: Date.now(), cipher: enc.cipher, iv: enc.iv };
+        const mappedFolder = img.folderId ? (oldToNew[img.folderId] || null) : null;
+        const rec = { id: uid(), name: img.name||'imported-image', type: blob.type||img.type||'image/*', size: blob.size||img.size, lastModified: img.lastModified||Date.now(), addedAt: Date.now(), cipher: enc.cipher, iv: enc.iv, folderId: mappedFolder };
         await putImageRecord(rec);
       }
       selections.clear();
@@ -363,96 +436,81 @@
   }
 
   // ------------------ Ingest Files (encrypt before store) -----------
-  async function ingestFiles(fileList){
+  async function ingestFiles(fileList, targetFolderId=null){
     const files = Array.from(fileList).filter(f=> f.type && f.type.startsWith('image/'));
     if(files.length===0){ alert('Please choose image files (including GIFs).'); return; }
     for(const f of files){
       const ab = await blobToArrayBuffer(f);
       const enc = await encryptArrayBuffer(ab);
-      const rec = { id: uid(), name: f.name, type: f.type, size: f.size, lastModified: f.lastModified, addedAt: Date.now(), cipher: enc.cipher, iv: enc.iv };
+      const rec = { id: uid(), name: f.name, type: f.type, size: f.size, lastModified: f.lastModified, addedAt: Date.now(), cipher: enc.cipher, iv: enc.iv, folderId: targetFolderId };
       await putImageRecord(rec);
     }
     await refresh();
   }
 
   // ------------------ Event wiring -----------------------------
-  fileInput.addEventListener('change', e=>{ if(e.target.files?.length) ingestFiles(e.target.files); e.target.value=''; });
+  fileInput.addEventListener('change', e=>{ if(e.target.files?.length) ingestFiles(e.target.files, currentFolderId && currentFolderId !== '__unsorted__' ? currentFolderId : null); e.target.value=''; });
   importInput.addEventListener('change', e=>{ if(e.target.files?.length) handleImport(e.target.files[0]); e.target.value=''; });
 
   dropzone.addEventListener('dragover', e=>{ e.preventDefault(); dropzone.classList.add('dragover'); });
   dropzone.addEventListener('dragleave', ()=> dropzone.classList.remove('dragover'));
-  dropzone.addEventListener('drop', e=>{ e.preventDefault(); dropzone.classList.remove('dragover'); if(e.dataTransfer.files?.length) ingestFiles(e.dataTransfer.files); });
+  dropzone.addEventListener('drop', e=>{ e.preventDefault(); dropzone.classList.remove('dragover'); if(e.dataTransfer.files?.length) ingestFiles(e.dataTransfer.files, currentFolderId && currentFolderId !== '__unsorted__' ? currentFolderId : null); });
 
-  selectAllBtn.addEventListener('click', async ()=>{
-    const items = await getAllRecords(); selections = new Set(items.map(i=>i.id)); refresh();
-  });
+  selectAllBtn.addEventListener('click', async ()=>{ const items = await getAllRecords(); selections = new Set(items.map(i=>i.id)); refresh(); });
 
-  clearSelBtn.addEventListener('click', async ()=>{
-    if(!selections.size) return; if(!confirm(`Delete ${selections.size} selected item(s)?`)) return;
-    for(const id of selections){ await deleteImageRecord(id); }
-    selections.clear(); refresh();
-  });
+  clearSelBtn.addEventListener('click', async ()=>{ if(!selections.size) return; if(!confirm(`Delete ${selections.size} selected item(s)?`)) return; for(const id of selections){ await deleteImageRecord(id); } selections.clear(); refresh(); });
 
-  clearAllBtn.addEventListener('click', async ()=>{
-    if(!confirm('Delete ALL images?')) return;
-    const store = txObjectStore('readwrite');
-    store.clear();
-    selections.clear(); refresh();
-  });
+  clearAllBtn.addEventListener('click', async ()=>{ if(!confirm('Delete ALL images?')) return; const store = txObjectStore('readwrite'); store.clear(); selections.clear(); refresh(); });
 
   exportSelBtn.addEventListener('click', async ()=>{ if(selections.size) exportByIds(Array.from(selections)); });
   exportAllBtn.addEventListener('click', async ()=>{ const items = await getAllRecords(); if(items.length) exportByIds(items.map(i=>i.id)); });
 
+  createFolderBtn.addEventListener('click', ()=>{ const name = (newFolderNameInput.value||'').trim(); if(!name){ alert('Enter folder name'); return; } createFolder(name); newFolderNameInput.value=''; });
+
+  renameFolderBtn.addEventListener('click', ()=>{
+    const f = folders.find(ff=>ff.id===currentFolderId);
+    if(!f) return; const name = prompt('Rename folder', f.name); if(name===null) return; if(!name.trim()) return alert('Folder name cannot be empty'); renameFolder(f.id, name.trim()); renderFolderPills();
+  });
+
+  deleteFolderBtn.addEventListener('click', async ()=>{
+    const f = folders.find(ff=>ff.id===currentFolderId);
+    if(!f) return; if(!confirm(`Delete folder "${f.name}" and move its images to Unsorted?`)) return; await deleteFolder(f.id); currentFolderId = null; renderFolderPills(); refresh();
+  });
+
+  moveToSelect.addEventListener('change', async ()=>{
+    const val = moveToSelect.value; if(!val) return; const target = val==='__unsorted__'? null : val; if(!selections.size) return alert('No items selected'); if(!confirm(`Move ${selections.size} item(s) to "${val==='__unsorted__'?'Unsorted': (folders.find(f=>f.id===val)||{}).name }"?`)) { moveToSelect.value=''; return; }
+    for(const id of selections){ const it = await txObjectStore('readonly').get(id); if(it.result){ const r = it.result; r.folderId = target; await putImageRecord(r); }}
+    selections.clear(); moveToSelect.value=''; refresh();
+  });
+
   // ------------------ Boot & Password prompt -------------------
   async function promptPasswordLoop(){
-    // Simple loop prompting up to unlimited times until password works or user cancels.
     while(true){
       const password = prompt('Enter password to unlock your encrypted gallery (choose a memorable password):');
-      if(password === null){
-        // user cancelled
-        alert('Cancelled. Page will still open but data cannot be decrypted without the password.');
-        return null;
-      }
+      if(password === null){ alert('Cancelled. Page will still open but data cannot be decrypted without the password.'); return null; }
       try{
         await ensureSaltAndKey(password);
-        // verify if there are records and test decrypt first record (if present)
         const items = await getAllRecords();
-        if(items.length === 0){
-          return password; // no records to verify; key accepted
-        }
-        // try to decrypt first item
+        if(items.length === 0){ await loadFolders(); return password; }
         try{
           const test = items[0];
           await decryptToArrayBuffer(test.iv, test.cipher);
-          return password; // success
-        }catch(e){
-          console.warn('Password failed to decrypt an item.', e);
-          alert('Incorrect password for this gallery (or data corrupted). Please try again.');
-          // loop again
-        }
-      }catch(e){
-        console.error('Key derivation error', e);
-        alert('Error deriving key — try again.');
-      }
+          await loadFolders();
+          return password;
+        }catch(e){ console.warn('Password failed to decrypt an item.', e); alert('Incorrect password for this gallery (or data corrupted). Please try again.'); }
+      }catch(e){ console.error('Key derivation error', e); alert('Error deriving key — try again.'); }
     }
   }
 
   (async function init(){
     try{
       db = await openDB();
-      // Prompt user for password and create/derive key + salt
       await promptPasswordLoop();
-      // Try to request persistent storage (optional)
-      if('storage' in navigator && navigator.storage.persist){
-        try{ await navigator.storage.persist(); }catch{ /* ignore */ }
-      }
+      if('storage' in navigator && navigator.storage.persist){ try{ await navigator.storage.persist(); }catch{ /* ignore */ } }
       await refresh();
-    }catch(err){
-      console.error('Init error', err); alert('Initialization failed: '+err.message);
-    }
+    }catch(err){ console.error('Init error', err); alert('Initialization failed: '+err.message); }
   })();
 
   </script>
 </body>
 </html>
-
